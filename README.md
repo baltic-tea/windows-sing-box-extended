@@ -1,3 +1,5 @@
+[🇷🇺 Русский](README.md) | [🇺🇸 English](en/README.md)
+
 # 📦 sing-box-extended Installer for Windows
 
 Интерактивный установщик, обновлятор и менеджер запуска [sing-box-extended](https://github.com/shtorm-7/sing-box-extended) для семейства операционных систем Windows.
