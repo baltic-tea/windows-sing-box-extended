@@ -121,7 +121,7 @@ function Fail {
     Restore-BackupIfNeeded
     Remove-WorkDir
     Restart-StoppedService
-    exit 1
+    throw "Установка прервана: $Message"
 }
 
 function Test-IsAdmin {
@@ -260,7 +260,7 @@ function Invoke-GitHubJson {
 
         return Invoke-RestMethod -Uri $Uri -Headers (New-GitHubHeaders) -TimeoutSec 15
     } catch {
-        Fail "Не удалось подключиться к GitHub API. Проверьте соединение."
+        Fail "Не удалось подключиться к GitHub API. Проверьте соединение. Детали: $($_.Exception.Message)"
     }
 }
 
@@ -277,7 +277,7 @@ function Invoke-DownloadFile {
             Invoke-WebRequest -Uri $Uri -OutFile $OutFile -Headers (New-GitHubHeaders) -TimeoutSec 15
         }
     } catch {
-        Fail "Не удалось скачать файл."
+        Fail "Не удалось скачать файл. Детали: $($_.Exception.Message)"
     }
 }
 
@@ -355,15 +355,18 @@ function Install-OrUpdateService {
     $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if ($existing) {
         Stop-TargetService -Name $Name
-        & sc.exe delete $Name | Out-Null
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
+        if ($service) {
+            $service | Remove-CimInstance
+        }
         Start-Sleep -Seconds 2
     }
 
     $binPath = "`"$BinaryPath`" -c `"$ConfigPath`" run"
-    & sc.exe create $Name binPath= $binPath start= auto DisplayName= "sing-box extended" | Out-Null
-
-    if ($LASTEXITCODE -ne 0) {
-        Fail "Не удалось создать службу Windows."
+    try {
+        New-Service -Name $Name -BinaryPathName $binPath -StartupType Automatic -DisplayName "sing-box extended" -ErrorAction Stop | Out-Null
+    } catch {
+        Fail "Не удалось создать службу Windows. Детали: $($_.Exception.Message)"
     }
 
     Write-RawLine "${G}[+] Служба Windows создана: ${Y}${Name}${N}"
@@ -381,9 +384,13 @@ function Remove-ServiceIfExists {
     }
 
     Stop-TargetService -Name $Name
-    & sc.exe delete $Name | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Fail "Не удалось удалить службу Windows: $Name"
+    $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
+    if ($service) {
+        try {
+            $service | Remove-CimInstance -ErrorAction Stop
+        } catch {
+            Fail "Не удалось удалить службу Windows: $Name. Детали: $($_.Exception.Message)"
+        }
     }
 
     Write-RawLine "${G}[+] Служба Windows удалена: ${Y}${Name}${N}"
@@ -437,11 +444,8 @@ function Add-DestinationToPath {
     }
 
     $current = [Environment]::GetEnvironmentVariable("Path", $scope)
-    if ([string]::IsNullOrWhiteSpace($current)) {
-        $current = ""
-    }
-
-    $newPath = if ([string]::IsNullOrWhiteSpace($current)) { $Directory } else { "$current;$Directory" }
+    $currentClean = if ($current) { $current.Trim().TrimEnd(';') } else { "" }
+    $newPath = if ([string]::IsNullOrWhiteSpace($currentClean)) { $Directory } else { "$currentClean;$Directory" }
     [Environment]::SetEnvironmentVariable("Path", $newPath, $scope)
 
     Write-RawLine "${G}[+] sing-box-extended добавлен в $scope PATH: ${Y}${Directory}${N}"
@@ -466,8 +470,19 @@ function Backup-ExistingBinary {
         $script:BackupPath = $backupPath
         $script:BackupOriginalPath = $Path
         Write-RawLine "${C}[*] Backup старого бинарника: ${Y}${backupPath}${N}"
+
+        # Очистка старых бэкапов
+        $parentDir = Split-Path -Parent $Path
+        $bakPrefix = (Split-Path -Leaf $Path) + ".bak."
+        $oldBackups = Get-ChildItem -LiteralPath $parentDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "$bakPrefix*" } |
+            Sort-Object LastWriteTime -Descending
+
+        if ($oldBackups.Count -gt 5) {
+            $oldBackups | Select-Object -Skip 5 | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
     } catch {
-        Fail "Не удалось создать backup старого бинарника."
+        Fail "Не удалось создать backup старого бинарника. Детали: $($_.Exception.Message)"
     }
 }
 
@@ -929,7 +944,8 @@ function Invoke-InstallOrUpdate {
 }
 
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    # Включаем TLS 1.2 и TLS 1.3 (код 12288 для .NET 4.5/4.7, где [Net.SecurityProtocolType]::Tls13 отсутствует)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 -bor 12288
 } catch {}
 
 $resolvedDestFile = Resolve-DefaultDestFile
